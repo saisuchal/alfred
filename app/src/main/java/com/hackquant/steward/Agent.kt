@@ -106,6 +106,12 @@ object Agent {
         val group = c.groupOf(msg.sender)
         val category = Category.of(msg)
         val categoryLevel = c.handling(category)
+        // A greeting always gets a light reply, even if the model chose silence. It still goes through the policy below.
+        val modelReplied = (0 until raw.length()).any { raw.optJSONObject(it)?.optString("tool") == "reply" }
+        if (fromModel && !modelReplied && msg.chat == null && isGreeting(msg.text)) {
+            raw.put(JSONObject().put("tool", "reply").put("decides", false)
+                .put("text", "Hey! ${c.userName.ifBlank { "They" }} will get back to you soon 🙂"))
+        }
         val proposals = (0 until raw.length()).mapNotNull { i ->
             val a = raw.optJSONObject(i) ?: return@mapNotNull null
             val skill = Skill.of(a.optString("tool")) ?: return@mapNotNull null
@@ -181,8 +187,13 @@ object Agent {
 
     private val GREETING = Regex("""(?i)(h+i+|hello|hey+|yo|hola|namaste|good (morning|afternoon|evening))( bro| da| ra| there)?[!. ]*""")
 
+    /** Letters and spaces only, so "Hi bro:)" or "hey 😄" still read as greetings. */
+    private fun bare(text: String) = text.replace(Regex("""[^\p{L}\s]"""), " ").replace(Regex("""\s+"""), " ").trim()
+
+    private fun isGreeting(text: String) = GREETING.matches(bare(text))
+
     /** Greetings and sign-offs: worth a light reply at most, never a briefing. */
-    private fun isSmallTalk(text: String) = isCloser(text) || GREETING.matches(text)
+    private fun isSmallTalk(text: String) = isCloser(text) || isGreeting(text)
 
     /** "I'll order it", "let me check": anything beyond passing a message on to the owner. */
     private fun promises(text: String, owner: String): Boolean {

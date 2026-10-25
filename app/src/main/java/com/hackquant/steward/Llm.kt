@@ -69,6 +69,7 @@ object Llm {
                 engine = LlmInference.createFromOptions(app, options)
                 status.value = "$modelName · ready"
                 loading = false
+                Agent.warmSoon() // prepare the prompt now, not when the first message arrives
                 Log.i(TAG, "loaded ${path.name} in ${System.currentTimeMillis() - t0}ms")
             } catch (e: Throwable) {
                 status.value = "Model failed to load: ${e.message}"
