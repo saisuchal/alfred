@@ -200,7 +200,7 @@ object Agent {
     private val OUTGOING = setOf(Skill.REPLY)
 
     private val IDENTITY = Regex(
-        """(?i)\b(who (am i|is (this|it)|are you|r u)|(are|r) (you|u) (a )?(bot|ai|human|real|robot)|is this (really )?\w+\s*\?|what are you)\b""")
+        """(?i)(\bwho (am i|is (this|it)|are you|r u)\b|\b(are|r) (you|u) (a )?(bot|ai|human|real|robot)\b|\bis this (really )?\w+\s*\?|^\s*what are you\s*\??\s*$)""")
 
     // Messages asking about the owner's availability or proposing plans.
     private val PLANS = Regex("""(?i)\b(free|available|busy|come|coming|join|meet|plan|party|drink|dinner|lunch|movie|hospital)\b""")
