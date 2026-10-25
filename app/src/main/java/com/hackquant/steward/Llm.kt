@@ -97,6 +97,7 @@ object Llm {
         val t0 = System.currentTimeMillis()
         val session = try {
             if (baseKey != prefix) {
+                Log.i(TAG, "preparing prompt: ${runCatching { newSession(llm).use { it.sizeInTokens(prefix) } }.getOrDefault(-1)} tokens")
                 base?.close()
                 base = newSession(llm).also { it.addQueryChunk(prefix) }
                 baseKey = prefix
@@ -110,12 +111,48 @@ object Llm {
         }
         try {
             session.addQueryChunk(suffix)
-            val out = fixBytes(session.generateResponse())
+            val out = fixBytes(stream(session, ::jsonComplete))
             Log.i(TAG, "generated in ${System.currentTimeMillis() - t0}ms: $out")
             return out
         } finally {
             session.close()
         }
+    }
+
+    /** True once the text holds one complete top-level JSON object. */
+    private fun jsonComplete(text: String): Boolean {
+        val start = text.indexOf('{')
+        if (start < 0) return false
+        var depth = 0
+        var inString = false
+        var escaped = false
+        for (ch in text.substring(start)) {
+            when {
+                escaped -> escaped = false
+                ch == '\\' && inString -> escaped = true
+                ch == '"' -> inString = !inString
+                !inString && ch == '{' -> depth++
+                !inString && ch == '}' -> { depth--; if (depth == 0) return true }
+            }
+        }
+        return false
+    }
+
+    /**
+     * Streams the answer and stops the model the moment [done] says the answer is complete.
+     * There's no output-length setting, and a small model otherwise keeps writing after its answer.
+     */
+    private fun stream(session: LlmInferenceSession, done: (String) -> Boolean): String {
+        val sb = StringBuilder()
+        val stopped = java.util.concurrent.atomic.AtomicBoolean(false)
+        val future = session.generateResponseAsync { partial, _ ->
+            synchronized(sb) { sb.append(partial) }
+            if (!stopped.get() && done(synchronized(sb) { sb.toString() }) && stopped.compareAndSet(false, true)) {
+                runCatching { session.cancelGenerateResponseAsync() }
+            }
+        }
+        runCatching { future.get(180, java.util.concurrent.TimeUnit.SECONDS) }
+        return synchronized(sb) { sb.toString() }
     }
 
     // GPT-2 style byte-to-unicode table used by Qwen's tokenizer, inverted.
@@ -163,7 +200,8 @@ object Llm {
         val session = newSession(llm)
         try {
             session.addQueryChunk("<|im_start|>system\n$system<|im_end|>\n<|im_start|>user\n$user<|im_end|>\n<|im_start|>assistant\n")
-            return fixBytes(session.generateResponse()).trim()
+            // One message is one line: stop at the first line break after some text.
+            return fixBytes(stream(session) { it.trim().contains('\n') || it.length > 300 }).trim()
         } finally {
             session.close()
         }

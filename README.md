@@ -6,6 +6,19 @@ Alfred reads incoming WhatsApp and SMS notifications and, using an on-device LLM
 
 Alfred works for you, not the people messaging you. It signs every message it sends as your assistant, never promises things it can't do, and asks before anything that speaks for you.
 
+## What it does for you
+
+- **Answer in one tap.** A briefing arrives with quick answers ("Works for me", "Can't make it") and a reply box. Type "yes 8" and Alfred sends "Suchal says 8 works 👍" and books it.
+- **Knows your day.** Your status ("In a meeting for 1 hour") and calendar free/busy shape what people hear right away, without revealing event details or where you are.
+- **Learns from you.** Your own replies become examples of your voice; after three approved replies to a circle, Alfred offers to handle that circle on its own.
+- **Follows up.** Unanswered items get a "Still checking with Suchal" after 30 minutes, and a second nudge to you.
+- **Ask Alfred.** "tell Praveen I'll be 10 min late", "what's pending?", "I'm back".
+- **Interrupts only when it matters.** Urgent and decisions notify with answer buttons; everything else collects in one quiet FYI summary.
+
+## Install
+
+Download [`apk/Alfred.apk`](apk/Alfred.apk) to an arm64 Android phone (8 GB RAM recommended) and push the model as below.
+
 ## Customisation
 
 - **Skills**: each action is Automatic, Ask first, or Never.

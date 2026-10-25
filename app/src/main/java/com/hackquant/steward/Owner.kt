@@ -125,7 +125,7 @@ object Owner {
         val booked = AFFIRMATIVE.containsMatchIn(ownerAnswer) &&
             Agent.parseWhen(msg.text.lowercase())?.let { cal ->
                 val r = Tools.execute(ctx, msg, Skill.CALENDAR, JSONObject().put("tool", "calendar")
-                    .put("title", "${msg.sender.substringBefore(" in ")}: ${msg.text.take(40)}")
+                    .put("title", "Plan with ${msg.sender.substringBefore(" in ")}")
                     .put("start", Agent.stamp.format(cal.time)))
                 added += Entry(Store.newId(), Skill.CALENDAR, r.summary, if (r.ok) Status.DONE else Status.FAILED, "{}", r.undo)
                 r.ok
@@ -301,7 +301,8 @@ object Owner {
     fun followUp(ctx: Context, activityId: Long) {
         Store.init(ctx)
         val a = Store.activity.value.firstOrNull { it.id == activityId } ?: return
-        val e = a.entries.firstOrNull { it.skill == Skill.BRIEF && it.status == Status.DONE && it.undo != "followed" } ?: return
+        val e = a.entries.firstOrNull { it.skill == Skill.BRIEF && it.status == Status.DONE && it.undo != "followed" }
+            ?: a.entries.firstOrNull { it.status == Status.PENDING && it.undo != "followed" } ?: return
         val c = Store.config.value
         val nudge = Tools.sendReply(ctx, a.msg, "Still checking with ${owner(c)}, thanks for waiting 🙂")
         Store.updateActivity(activityId) { act ->
@@ -321,11 +322,16 @@ object Owner {
         Store.init(ctx)
         val text = input.trim()
         val c = Store.config.value
-        Regex("""(?i)^(tell|message|text|reply to|ask)\s+(.+?)\s+(that\s+|to\s+)?(.+)$""").find(text)?.let { m ->
-            val name = m.groupValues[2].trim().lowercase()
-            val content = m.groupValues[4].trim()
-            val target = Store.activity.value.firstOrNull { a -> a.msg.chat == null && a.msg.sender.lowercase().startsWith(name) }
-                ?: return "I haven't seen a message from “${m.groupValues[2]}” yet. I can only message people after they message you."
+        Regex("""(?i)^(tell|message|text|reply to|ask)\s+(.+)$""").find(text)?.let { m ->
+            val rest = m.groupValues[2].trim()
+            // Match the longest known name at the start, so "Tara 09 ..." isn't taken as "Tara".
+            val people = Store.activity.value.filter { it.msg.chat == null }.map { it.msg.sender }.distinct().sortedByDescending { it.length }
+            val name = people.firstOrNull { rest.lowercase().startsWith(it.lowercase() + " ") }
+                ?: people.firstOrNull { rest.lowercase().startsWith(it.substringBefore(" ").lowercase() + " ") }
+                ?: return "I haven't seen a message from “${rest.substringBefore(" ")}” yet. I can only message people after they message you."
+            val matched = if (rest.lowercase().startsWith(name.lowercase() + " ")) name else name.substringBefore(" ")
+            val content = rest.substring(matched.length).trim().removePrefix("that ").removePrefix("to ").trim()
+            val target = Store.activity.value.first { it.msg.chat == null && it.msg.sender == name }
             if (!Replies.canSend(target.msg.replyId))
                 return "I can't reach ${target.msg.sender} right now. Android only lets me reply while their latest message notification is open."
             val msgText = composeOutgoing(c, target.msg, content)
