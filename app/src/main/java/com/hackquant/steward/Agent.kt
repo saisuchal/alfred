@@ -128,10 +128,13 @@ object Agent {
         // A greeting always gets a light reply, even if the model chose silence. It still goes through the policy below.
         val modelReplied = (0 until raw.length()).any { raw.optJSONObject(it)?.optString("tool") == "reply" }
         // At most one canned greeting or acknowledgement per person every 10 minutes, so quick bursts don't get flooded.
-        val repliedRecently = System.currentTimeMillis() - (c.introduced[msg.sender] ?: 0L) < 10 * 60_000
+        // Only earlier canned replies count, so a real answer just before doesn't swallow this acknowledgement.
+        val repliedRecently = System.currentTimeMillis() - (lastCanned[msg.sender] ?: 0L) < 2 * 60_000
+        val isPreview = msg.app == "Test"
         if (fromModel && !modelReplied && msg.chat == null && isGreeting(msg.text) && !repliedRecently) {
             raw.put(JSONObject().put("tool", "reply").put("decides", false)
                 .put("text", "Hey! ${c.userName.ifBlank { "They" }} will get back to you soon 🙂"))
+            if (!isPreview) lastCanned[msg.sender] = System.currentTimeMillis()
         }
         val proposals = (0 until raw.length()).mapNotNull { i ->
             val a = raw.optJSONObject(i) ?: return@mapNotNull null
@@ -212,6 +215,7 @@ object Agent {
         }
         val finalProposals = if (fromModel && msg.chat == null && !repliedNow && waitingOnOwner && !repliedRecently &&
             c.autonomy(Skill.REPLY) != Autonomy.OFF && !isSmallTalk(msg.text.trim())) {
+            if (!isPreview) lastCanned[msg.sender] = System.currentTimeMillis()
             proposalsWithBrief + Proposal(Skill.REPLY, JSONObject().put("tool", "reply").put("text",
                 "Got it! I've passed this on to ${c.userName.ifBlank { "them" }}, they'll get back to you soon 🙂"), Decision.AUTO)
         } else proposalsWithBrief
@@ -227,6 +231,9 @@ object Agent {
     }
 
     private val OUTGOING = setOf(Skill.REPLY)
+
+    // When Alfred last sent each person a canned greeting or acknowledgement.
+    private val lastCanned = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     // Signatures of AI assistants, ours included, so two bots never reply to each other.
     private val BOT_SIGNED = Regex("""(?i)🤖|\b(ai|virtual|automated) assistant\b|\bauto-?reply\b""")
