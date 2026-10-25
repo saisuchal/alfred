@@ -129,7 +129,12 @@ object Agent {
             val skillLevel = c.autonomy(skill)
             val isPerson = category == Category.PERSONAL || category == Category.GROUP_CHAT
             // The first setting that holds Alfred back is the one we report.
+            // Scheduling is the owner's decision unless one of their rules asked for it.
+            val ruleAsked = c.rules.filter { it.enabled }.getOrNull(ruleIndex - 1)?.text
+                ?.contains(Regex("(?i)remind|calendar|schedule")) == true
             val askBecause = when {
+                (skill == Skill.CALENDAR || skill == Skill.REMINDER) && !ruleAsked ->
+                    "it adds to your schedule, and none of your rules asked for that"
                 categoryLevel == Autonomy.ASK -> "${category.label} are set to Always ask first (People → Message types)"
                 skillLevel == Autonomy.ASK -> "${skill.label} is set to Ask first (Settings → What it can do)"
                 skill in OUTGOING && group.autonomy == Autonomy.ASK ->
@@ -163,6 +168,17 @@ object Agent {
             proposals + Proposal(Skill.BRIEF, JSONObject().put("tool", "brief")
                 .put("summary", "${msg.sender} said: “${msg.text.take(120)}”"), Decision.AUTO)
         } else proposals
+        // Never leave a person hanging: if Alfred is only briefing the owner or waiting for approval,
+        // send a safe acknowledgement now. It promises nothing beyond passing the message on.
+        val repliedNow = proposalsWithBrief.any { it.skill == Skill.REPLY && it.decision == Decision.AUTO }
+        val waitingOnOwner = proposalsWithBrief.any {
+            it.skill == Skill.BRIEF || (it.skill == Skill.REPLY && it.decision == Decision.ASK)
+        }
+        val finalProposals = if (fromModel && msg.chat == null && !repliedNow && waitingOnOwner &&
+            c.autonomy(Skill.REPLY) != Autonomy.OFF && !isSmallTalk(msg.text.trim())) {
+            proposalsWithBrief + Proposal(Skill.REPLY, JSONObject().put("tool", "reply").put("text",
+                "Got it! I've passed this on to ${c.userName.ifBlank { "them" }}, they'll get back to you soon 🙂"), Decision.AUTO)
+        } else proposalsWithBrief
         val enabledRules = c.rules.filter { it.enabled }
         val note = buildList {
             enabledRules.getOrNull(ruleIndex - 1)?.let { add("Followed your rule: “${it.text}”") }
@@ -171,7 +187,7 @@ object Agent {
             if (droppedCalendar) add("Skipped a calendar suggestion because the message names no day or time.")
             if (droppedReminder) add("Skipped a reminder because its time wasn't in the message or your rules.")
         }.joinToString(" ").ifBlank { null }
-        return Plan(proposalsWithBrief, engine, note)
+        return Plan(finalProposals, engine, note)
     }
 
     private val OUTGOING = setOf(Skill.REPLY)
