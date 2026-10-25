@@ -136,6 +136,9 @@ object Agent {
                     "${msg.sender} is in ${group.name}, which is set to Ask me first (People → ${group.name})"
                 skill == Skill.REPLY && (a.optBoolean("decides") || COMMITS.containsMatchIn(a.optString("text"))) ->
                     "this reply speaks for you (it agrees to something or answers for you)"
+                // Anything about the owner's time or plans is the owner's call, never answered automatically.
+                skill == Skill.REPLY && (PLANS.containsMatchIn(msg.text) || TIME_CUE.containsMatchIn(msg.text)) ->
+                    "it's about $owner's time or plans, which only $owner can decide"
                 skill == Skill.REPLY && promises(a.optString("text"), owner) ->
                     "this reply promises something Alfred can't do itself"
                 skill == Skill.REMEMBER && !grounded(a.optString("fact"), msg.text) ->
@@ -173,9 +176,12 @@ object Agent {
 
     private val OUTGOING = setOf(Skill.REPLY)
 
+    // Messages asking about the owner's availability or proposing plans.
+    private val PLANS = Regex("""(?i)\b(free|available|busy|come|coming|join|meet|plan|party|drink|dinner|lunch|movie|hospital)\b""")
+
     // Replies that commit the user to something, caught even when the model forgets "decides".
     private val COMMITS = Regex(
-        """\b(see you|i'?ll (get|bring|come|be there|send|pay|do)|coming (over|soon)|let'?s go|sure,? let'?s|count me in|i'?m in|deal|done|on my way|will do)\b""",
+        """\b(see you|i'?ll (get|bring|come|be there|send|pay|do)|coming (over|soon)|let'?s|count me in|i'?m in|deal|done|on my way|will do|i'?m (not )?(free|available|busy)|i am (not )?(free|available|busy)|available)\b""",
         RegexOption.IGNORE_CASE,
     )
 
