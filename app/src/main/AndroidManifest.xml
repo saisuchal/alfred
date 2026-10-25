@@ -36,5 +36,11 @@
 
         <receiver android:name=".ActionReceiver" android:exported="false" />
         <receiver android:name=".GeofenceReceiver" android:exported="false" />
+        <!-- Scenario testing over adb only: DUMP is held by the shell, never granted to other apps. -->
+        <receiver
+            android:name=".TestReceiver"
+            android:exported="true"
+            android:permission="android.permission.DUMP" />
+        <receiver android:name=".TestSink" android:exported="false" />
     </application>
 </manifest>

@@ -66,6 +66,7 @@ import androidx.compose.ui.unit.dp
 import com.hackquant.steward.Activity
 import com.hackquant.steward.Entry
 import com.hackquant.steward.Llm
+import com.hackquant.steward.Owner
 import com.hackquant.steward.Rule
 import com.hackquant.steward.Skill
 import com.hackquant.steward.Status
@@ -103,6 +104,8 @@ fun HomeScreen(perms: Perms, openSettings: () -> Unit) {
     val upcoming by produceState(emptyList<Tools.Upcoming>(), acts) { value = withContext(Dispatchers.IO) { Tools.upcoming(ctx) } }
     val startOfDay = Calendar.getInstance().apply { set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0) }.timeInMillis
     val today = acts.filter { it.time >= startOfDay }
+    var settingStatus by remember { mutableStateOf(false) }
+    if (settingStatus) StatusSheet { settingStatus = false }
 
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item {
@@ -111,6 +114,7 @@ fun HomeScreen(perms: Perms, openSettings: () -> Unit) {
                 StatusPill(!config.paused) { Store.update { it.copy(paused = !it.paused) } }
             }
         }
+        item { Row(Modifier.padding(start = 4.dp)) { StatusChip(config) { settingStatus = true } } }
         item {
             Summary(
                 handled = today.size,
@@ -136,22 +140,18 @@ fun HomeScreen(perms: Perms, openSettings: () -> Unit) {
             items(pending, key = { "p${it.id}" }) { PendingCard(it) }
         }
 
-        val dayAgo = System.currentTimeMillis() - 24 * 60 * 60_000
-        val briefs = acts.filter { it.time >= dayAgo }.flatMap { a ->
-            a.entries.filter { it.skill == Skill.BRIEF && it.status == Status.DONE }.map { a to it }
+        // Open items: people waiting on an answer from you. FYI ones collect quietly below.
+        val open = acts.flatMap { a -> a.entries.filter { it.skill == Skill.BRIEF && it.status == Status.DONE }.map { a to it } }
+        val (fyi, waiting) = open.partition { (a, e) -> Owner.priority(a, e) == Owner.Priority.FYI }
+        if (waiting.isNotEmpty()) {
+            item { Overline("Waiting on you · ${waiting.size}") }
+            items(waiting.sortedByDescending { (a, e) -> Owner.priority(a, e) == Owner.Priority.URGENT }, key = { (a, e) -> "w${a.id}-${e.id}" }) { (a, e) -> WaitingCard(a, e) }
         }
-        if (briefs.isNotEmpty()) {
-            item { Overline("Briefings · ${briefs.size}") }
-            item {
-                Panel {
-                    briefs.forEachIndexed { i, (a, e) ->
-                        if (i > 0) Divider()
-                        ListRow(e.summary.removePrefix("Told you: "), "${a.msg.sender} · ${whenLabel(a.time)}",
-                            leading = { Avatar(a.msg.sender, 36.dp) },
-                            trailing = { TextButton(onClick = { Store.updateEntry(a.id, e.id) { it.copy(status = Status.DISMISSED) } }) { Text("Got it") } })
-                    }
-                }
-            }
+        Owner.autonomySuggestion(config)?.let { g -> item { SuggestionCard(g, config.approvals[g.id] ?: 3) } }
+        item { AskAlfred(acts.firstOrNull { it.msg.chat == null }?.msg?.sender?.substringBefore(" ")) }
+        if (fyi.isNotEmpty()) {
+            item { Overline("For your information") }
+            item { FyiPanel(fyi) }
         }
 
         if (upcoming.isNotEmpty()) {
@@ -389,7 +389,7 @@ private fun ConversationThread(oldestFirst: List<Activity>) {
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         oldestFirst.forEach { a ->
-            Theirs(a.msg.text, whenLabel(a.time))
+            Theirs(a.msg.text, whenLabel(a.time) + (a.intent?.let { " · $it" } ?: ""))
             a.entries.forEach { e -> Ours(a, e) }
             a.stage?.let { st ->
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
@@ -440,6 +440,7 @@ private fun Ours(a: Activity, e: Entry) {
                 Status.DISMISSED -> "Skipped" to MaterialTheme.colorScheme.onSurfaceVariant
                 Status.UNDONE -> "Undone" to MaterialTheme.colorScheme.onSurfaceVariant
                 Status.BLOCKED -> "Not done" to MaterialTheme.colorScheme.error
+                Status.ANSWERED -> "You answered" to extra.success
             }
             Row(
                 Modifier.fillMaxWidth(0.9f).wrapContentWidth(Alignment.End).clip(MaterialTheme.shapes.small)

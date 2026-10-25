@@ -87,6 +87,8 @@ object Tools {
         Result(false, "${describe(skill, a)} · failed: ${e.message}")
     }
 
+    fun sendReply(ctx: Context, msg: Incoming, draft: String): Result = reply(ctx, msg, draft)
+
     private fun reply(ctx: Context, msg: Incoming, draft: String): Result {
         if (draft.isBlank()) return Result(false, "Empty reply skipped")
         val id = msg.replyId
@@ -205,10 +207,10 @@ object Tools {
         return Result(true, "Remembered: $fact", "fact:$fact")
     }
 
-    /** Lets the owner know what someone asked or said, as a notification and on Home. */
+    /** Records what someone asked or said. The notification is posted afterwards, by priority (Owner.postBrief). */
+    @Suppress("UNUSED_PARAMETER")
     private fun brief(ctx: Context, msg: Incoming, summary: String): Result {
         val text = summary.ifBlank { "${msg.sender} said: “${msg.text.take(120)}”" }
-        notify(ctx, (Store.newId() % Int.MAX_VALUE).toInt(), "Alfred · ${msg.sender}", text)
         return Result(true, "Told you: $text")
     }
 
@@ -249,9 +251,20 @@ object Tools {
             if (editedText != null) action.put("text", editedText)
             val r = execute(ctx, a.msg, e.skill, action)
             r.sent?.let { action.put("text", it) }
+            if (r.ok && e.skill == Skill.REPLY) {
+                Owner.noteApproval(Store.config.value.groupOf(a.msg.sender).id)
+                Owner.learn(a.msg.sender, a.msg.text, editedText ?: action.optString("text").substringBefore("\n🤖"))
+            }
             Store.updateEntry(activityId, e.id) {
                 it.copy(summary = r.summary, status = if (r.ok) Status.DONE else Status.FAILED, undo = r.undo, action = action.toString())
             }
+        }
+        // Approving a reply answers the person, so the matching briefing is done too.
+        if (Store.activity.value.firstOrNull { it.id == activityId }?.entries?.any { it.skill == Skill.REPLY && it.status == Status.DONE } == true) {
+            Store.updateActivity(activityId) { act ->
+                act.copy(entries = act.entries.map { if (it.skill == Skill.BRIEF && it.status == Status.DONE) it.copy(status = Status.ANSWERED) else it })
+            }
+            Owner.cancelBrief(ctx, activityId)
         }
         refreshApproval(ctx, activityId)
     }

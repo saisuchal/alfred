@@ -49,7 +49,19 @@ class StewardListener : NotificationListenerService() {
         val extras = n.extras
         // Messaging-style notifications carry the thread; the last entry is the newest message.
         @Suppress("DEPRECATION")
-        val last = extras.getParcelableArray(Notification.EXTRA_MESSAGES)?.lastOrNull() as? Bundle
+        val thread = extras.getParcelableArray(Notification.EXTRA_MESSAGES)?.mapNotNull { it as? Bundle }.orEmpty()
+        val last = thread.lastOrNull()
+        // The owner replied themselves: learn from it and close what Alfred was holding for this person.
+        if (last != null && isFromUser(extras, last)) {
+            val mine = last.getCharSequence("text")?.toString().orEmpty()
+            if (mine.isNotBlank() && !Replies.sentRecently(mine)) {
+                val theirs = thread.dropLast(1).lastOrNull { !isFromUser(extras, it) }?.getCharSequence("text")?.toString()
+                val title = extras.getCharSequence(Notification.EXTRA_CONVERSATION_TITLE)?.toString()
+                    ?: extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()
+                title?.let(::cleanName)?.takeIf { it.isNotBlank() }?.let { who -> Owner.ownerReplied(this, who, theirs, mine) }
+            }
+            return
+        }
         val conversation = extras.getCharSequence(Notification.EXTRA_CONVERSATION_TITLE)?.toString()?.let(::cleanName)
         val person = (last?.getCharSequence("sender")?.toString()
             ?: extras.getCharSequence(Notification.EXTRA_TITLE)?.toString())?.let(::cleanName) ?: return

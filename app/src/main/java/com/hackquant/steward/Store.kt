@@ -81,6 +81,10 @@ data class Config(
     val introduced: Map<String, Long> = emptyMap(), // sender -> when Alfred last said it's an assistant
     val groupChats: Map<String, ChatMode> = emptyMap(), // group conversation title -> how to treat it
     val aliases: List<String> = emptyList(),            // other names people use for the owner, for mentions
+    val status: String = "",                            // e.g. "In a meeting"; empty when none
+    val statusUntil: Long = 0,                          // 0 = until cleared
+    val examples: List<Example> = emptyList(),          // how the owner actually replied, newest last
+    val approvals: Map<String, Int> = emptyMap(),       // circle id -> replies the owner approved
 ) {
     fun chatMode(chat: String) = groupChats[chat] ?: ChatMode.MENTIONS
 
@@ -168,7 +172,10 @@ data class Incoming(
     val key: String? = null,  // source notification key, used to dismiss it
 )
 
-enum class Status { DONE, PENDING, DISMISSED, UNDONE, FAILED, BLOCKED }
+enum class Status { DONE, PENDING, DISMISSED, UNDONE, FAILED, BLOCKED, ANSWERED }
+
+/** One real exchange: what someone wrote and how the owner answered. Used to sound like the owner. */
+data class Example(val sender: String, val theirs: String, val mine: String, val time: Long)
 
 /** Where a message is in the pipeline while Alfred works on it. */
 enum class Stage(val label: String) {
@@ -196,6 +203,7 @@ data class Activity(
     val stage: Stage? = null, // null once Alfred has finished with the message
     val stageAt: Long = 0,
     val note: String? = null, // e.g. which of the user's rules the model followed
+    val intent: String? = null, // what the model judged the message to be: question, plan, request…
 )
 
 /** Strips WhatsApp's decorations: a leading "~ " for unsaved numbers and a trailing "(5 messages)" count. */
@@ -325,6 +333,11 @@ object Store {
         .put("introduced", JSONObject(c.introduced))
         .put("groupChats", JSONObject().apply { c.groupChats.forEach { (k, v) -> put(k, v.name) } })
         .put("aliases", JSONArray(c.aliases))
+        .put("status", c.status).put("statusUntil", c.statusUntil)
+        .put("examples", JSONArray(c.examples.map {
+            JSONObject().put("sender", it.sender).put("theirs", it.theirs).put("mine", it.mine).put("time", it.time)
+        }))
+        .put("approvals", JSONObject(c.approvals))
 
     private fun configFrom(o: JSONObject): Config {
         val d = Config()
@@ -359,12 +372,18 @@ object Store {
                 j.keys().asSequence().associateWith { runCatching { ChatMode.valueOf(j.getString(it)) }.getOrDefault(ChatMode.MENTIONS) }
             } ?: d.groupChats,
             aliases = o.optJSONArray("aliases")?.strings() ?: d.aliases,
+            status = o.optString("status", ""),
+            statusUntil = o.optLong("statusUntil", 0),
+            examples = o.optJSONArray("examples")?.objects()?.map {
+                Example(it.getString("sender"), it.optString("theirs"), it.getString("mine"), it.optLong("time"))
+            } ?: d.examples,
+            approvals = o.optJSONObject("approvals")?.let { j -> j.keys().asSequence().associateWith { j.getInt(it) } } ?: d.approvals,
         )
     }
 
     private fun activityTo(a: Activity) = JSONObject()
         .put("id", a.id).put("time", a.time).put("engine", a.engine).put("note", a.note ?: "")
-        .put("stage", a.stage?.name ?: "")
+        .put("stage", a.stage?.name ?: "").put("intent", a.intent ?: "")
         .put("sender", a.msg.sender).put("app", a.msg.app).put("pkg", a.msg.pkg).put("text", a.msg.text)
         .put("chat", a.msg.chat ?: "")
         .put("entries", JSONArray(a.entries.map {
@@ -386,5 +405,6 @@ object Store {
         engine = o.optString("engine"),
         stage = o.optString("stage").ifBlank { null }?.let { runCatching { Stage.valueOf(it) }.getOrNull() },
         note = o.optString("note").ifBlank { null },
+        intent = o.optString("intent").ifBlank { null },
     )
 }

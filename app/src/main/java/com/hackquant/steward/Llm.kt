@@ -30,6 +30,8 @@ object Llm {
     fun modelDir(ctx: Context): File = ctx.getExternalFilesDir(null)!!
 
     private fun candidates(ctx: Context) = listOf(
+        File("/data/local/tmp/llm/model-4b.litertlm"),
+        File(modelDir(ctx), "model-4b.litertlm"),
         File("/data/local/tmp/llm/model-4k.task"),
         File(modelDir(ctx), "model-4k.task"),
         File("/data/local/tmp/llm/model.task"),
@@ -51,30 +53,35 @@ object Llm {
         val app = ctx.applicationContext
         loader.execute {
             if (engine != null) return@execute
-            val path = candidates(app).firstOrNull { it.canRead() }
-            if (path == null) {
+            val paths = candidates(app).filter { it.canRead() }
+            if (paths.isEmpty()) {
                 status.value = "No model installed"
                 return@execute
             }
-            contextTokens = if (path.name.contains("4k")) 4096 else 1280
-            modelName = "Qwen2.5-1.5B · ${contextTokens / 1024.0}k ctx".replace(".0k", "k")
-            status.value = "Loading $modelName…"
             loading = true
-            try {
-                val t0 = System.currentTimeMillis()
-                val options = LlmInference.LlmInferenceOptions.builder()
-                    .setModelPath(path.absolutePath)
-                    .setMaxTokens(contextTokens)
-                    .build()
-                engine = LlmInference.createFromOptions(app, options)
-                status.value = "$modelName · ready"
-                loading = false
-                Agent.warmSoon() // prepare the prompt now, not when the first message arrives
-                Log.i(TAG, "loaded ${path.name} in ${System.currentTimeMillis() - t0}ms")
-            } catch (e: Throwable) {
-                status.value = "Model failed to load: ${e.message}"
-                loading = false
+            // Try the largest model first; if this runtime can't load it, fall back to the next one.
+            for (path in paths) {
+                val big = path.name.contains("4b")
+                contextTokens = if (big || path.name.contains("4k")) 4096 else 1280
+                modelName = (if (big) "Qwen3-4B" else "Qwen2.5-1.5B") + " · ${contextTokens / 1024}k ctx"
+                status.value = "Loading $modelName…"
+                try {
+                    val t0 = System.currentTimeMillis()
+                    val options = LlmInference.LlmInferenceOptions.builder()
+                        .setModelPath(path.absolutePath)
+                        .setMaxTokens(contextTokens)
+                        .build()
+                    engine = LlmInference.createFromOptions(app, options)
+                    status.value = "$modelName · ready"
+                    Log.i(TAG, "loaded ${path.name} in ${System.currentTimeMillis() - t0}ms")
+                    break
+                } catch (e: Throwable) {
+                    Log.w(TAG, "couldn't load ${path.name}: ${e.message}")
+                    status.value = "Model failed to load: ${e.message}"
+                }
             }
+            loading = false
+            if (engine != null) Agent.warmSoon() // prepare the prompt now, not when the first message arrives
         }
     }
 
@@ -148,6 +155,19 @@ object Llm {
     }
 
     @Synchronized fun isWarm(prefix: String) = baseKey == prefix
+
+    /** A short standalone prompt, e.g. rewording the owner's answer. Doesn't touch the cached prompt. */
+    @Synchronized
+    fun generateOnce(system: String, user: String): String {
+        val llm = engine ?: error("model not loaded")
+        val session = newSession(llm)
+        try {
+            session.addQueryChunk("<|im_start|>system\n$system<|im_end|>\n<|im_start|>user\n$user<|im_end|>\n<|im_start|>assistant\n")
+            return fixBytes(session.generateResponse()).trim()
+        } finally {
+            session.close()
+        }
+    }
 
     /** Process the prefix ahead of time so the first real message is fast. */
     fun warm(prefix: String) {
