@@ -87,6 +87,18 @@ object Agent {
                 "You're talking to Alfred, $owner's AI assistant. $owner will see your message and get back to you.")
             return Plan(listOf(Proposal(Skill.REPLY, answer, Decision.AUTO)), "Alfred · instant answer")
         }
+        fun briefOnly(summary: String, why: String): Plan =
+            if (c.autonomy(Skill.BRIEF) == Autonomy.OFF) Plan(emptyList(), why)
+            else Plan(listOf(Proposal(Skill.BRIEF, JSONObject().put("tool", "brief").put("summary", summary), Decision.AUTO)), why)
+        // Another assistant signed this. Replying would start two bots talking to each other forever.
+        if (BOT_SIGNED.containsMatchIn(msg.text))
+            return briefOnly("${msg.sender}'s assistant replied: “${msg.text.take(100)}”", "Alfred · from another assistant, not replying")
+        // Photos, voice notes, missed calls, deleted messages: nothing for the AI to read.
+        when (nonText(msg.text)) {
+            "deleted" -> return Plan(emptyList(), "Skipped · deleted message")
+            "call" -> return briefOnly("${msg.sender} tried to call you", "Alfred · no AI needed")
+            "media" -> return briefOnly("${msg.sender} sent ${msg.text.trim()}", "Alfred · no AI needed")
+        }
         if (!Llm.ready()) Llm.awaitReady(90_000)
         val t0 = System.currentTimeMillis()
         var engine = "Keyword rules (model not loaded)"
@@ -115,7 +127,9 @@ object Agent {
         val categoryLevel = c.handling(category)
         // A greeting always gets a light reply, even if the model chose silence. It still goes through the policy below.
         val modelReplied = (0 until raw.length()).any { raw.optJSONObject(it)?.optString("tool") == "reply" }
-        if (fromModel && !modelReplied && msg.chat == null && isGreeting(msg.text)) {
+        // At most one canned greeting or acknowledgement per person every 10 minutes, so quick bursts don't get flooded.
+        val repliedRecently = System.currentTimeMillis() - (c.introduced[msg.sender] ?: 0L) < 10 * 60_000
+        if (fromModel && !modelReplied && msg.chat == null && isGreeting(msg.text) && !repliedRecently) {
             raw.put(JSONObject().put("tool", "reply").put("decides", false)
                 .put("text", "Hey! ${c.userName.ifBlank { "They" }} will get back to you soon 🙂"))
         }
@@ -133,6 +147,8 @@ object Agent {
                 droppedReminder = true
                 return@mapNotNull null
             }
+            if (skill == Skill.REPLY) a.put("text", cleanReply(a.optString("text"), owner))
+            val reply = if (skill == Skill.REPLY) a.optString("text") else ""
             val skillLevel = c.autonomy(skill)
             val isPerson = category == Category.PERSONAL || category == Category.GROUP_CHAT
             // The first setting that holds Alfred back is the one we report.
@@ -146,6 +162,11 @@ object Agent {
                 skillLevel == Autonomy.ASK -> "${skill.label} is set to Ask first (Settings → What it can do)"
                 skill in OUTGOING && group.autonomy == Autonomy.ASK ->
                     "${msg.sender} is in ${group.name}, which is set to Ask me first (People → ${group.name})"
+                skill == Skill.REPLY && SENSITIVE.containsMatchIn(msg.text) ->
+                    "the message involves money or private details"
+                skill == Skill.REPLY && AS_OWNER.containsMatchIn(reply) -> "it talks as if it were you"
+                skill == Skill.REPLY && revealsPlace(reply, c) -> "it may reveal where you are"
+                skill == Skill.REPLY && reply.split(Regex("\\s+")).size > 40 -> "it's a long reply"
                 skill == Skill.REPLY && (a.optBoolean("decides") || COMMITS.containsMatchIn(a.optString("text"))) ->
                     "this reply speaks for you (it agrees to something or answers for you)"
                 // Anything about the owner's time or plans is the owner's call, never answered automatically.
@@ -170,18 +191,26 @@ object Agent {
         }
         // Safety net: if a person wrote and Alfred is neither replying nor briefing, tell the owner anyway.
         val handled = proposals.any { (it.skill == Skill.REPLY || it.skill == Skill.BRIEF) && it.decision != Decision.BLOCKED }
-        val proposalsWithBrief = if (fromModel && !handled && c.autonomy(Skill.BRIEF) != Autonomy.OFF &&
-            (category == Category.PERSONAL || category == Category.UNKNOWN) && !isSmallTalk(msg.text.trim())) {
+        val urgent = URGENT.containsMatchIn(msg.text)
+        val mustBrief = urgent || (SENSITIVE.containsMatchIn(msg.text) && category != Category.BUSINESS)
+        val briefed = proposals.any { it.skill == Skill.BRIEF && it.decision != Decision.BLOCKED }
+        val proposalsWithBrief = (if (c.autonomy(Skill.BRIEF) != Autonomy.OFF && !briefed &&
+            ((fromModel && !handled && (category == Category.PERSONAL || category == Category.UNKNOWN) && !isSmallTalk(msg.text.trim())) || mustBrief)) {
             proposals + Proposal(Skill.BRIEF, JSONObject().put("tool", "brief")
                 .put("summary", "${msg.sender} said: “${msg.text.take(120)}”"), Decision.AUTO)
-        } else proposals
+        } else proposals).map { p ->
+            // Flag urgent briefings so they stand out in the notification and on Home.
+            if (urgent && p.skill == Skill.BRIEF && !p.action.optString("summary").startsWith("⚠️"))
+                p.copy(action = JSONObject(p.action.toString()).put("summary", "⚠️ Urgent · " + p.action.optString("summary")))
+            else p
+        }
         // Never leave a person hanging: if Alfred is only briefing the owner or waiting for approval,
         // send a safe acknowledgement now. It promises nothing beyond passing the message on.
         val repliedNow = proposalsWithBrief.any { it.skill == Skill.REPLY && it.decision == Decision.AUTO }
         val waitingOnOwner = proposalsWithBrief.any {
             it.skill == Skill.BRIEF || (it.skill == Skill.REPLY && it.decision == Decision.ASK)
         }
-        val finalProposals = if (fromModel && msg.chat == null && !repliedNow && waitingOnOwner &&
+        val finalProposals = if (fromModel && msg.chat == null && !repliedNow && waitingOnOwner && !repliedRecently &&
             c.autonomy(Skill.REPLY) != Autonomy.OFF && !isSmallTalk(msg.text.trim())) {
             proposalsWithBrief + Proposal(Skill.REPLY, JSONObject().put("tool", "reply").put("text",
                 "Got it! I've passed this on to ${c.userName.ifBlank { "them" }}, they'll get back to you soon 🙂"), Decision.AUTO)
@@ -198,6 +227,44 @@ object Agent {
     }
 
     private val OUTGOING = setOf(Skill.REPLY)
+
+    // Signatures of AI assistants, ours included, so two bots never reply to each other.
+    private val BOT_SIGNED = Regex("""(?i)🤖|\b(ai|virtual|automated) assistant\b|\bauto-?reply\b""")
+
+    private val URGENT = Regex("""(?i)\b(urgent\w*|emergency|asap|accident|ambulance|hospital|sos|help me|call me (now|asap|immediately)|immediately)\b""")
+
+    private val SENSITIVE = Regex(
+        """(?i)\b(otp|password|passcode|pin|cvv|bank|account (no|number)|ifsc|upi|gpay|phonepe|paytm|send (me )?money|transfer|lend|loan|borrow|rupees|inr)\b|₹|\brs\.? ?\d|\b\d+ ?(rs|rupees|k|inr|bucks)\b""")
+
+    // The reply describes the owner's own state as "I", i.e. it's impersonating them.
+    private val AS_OWNER = Regex(
+        """(?i)\b(i'?m|i am|i was|i have been|i'?ve been) (at|in|on|home|out|busy|free|driving|sick|tired|working|going|coming|here|there|fine|good|okay|ok|great|outside|travelling|traveling)\b|\bmy (mom|dad|mother|father|wife|husband|brother|sister|office|home|house|place|car|work)\b""")
+
+    // Chatbot filler a small model falls back to; replaced with a polite hand-off.
+    private val CHATBOT = Regex(
+        """(?i)i'?m sorry|i apologi[sz]e|as an ai|language model|how (can|may) i (help|assist)|provide more context|not sure how to proceed|i (don'?t|do not) (understand|know)|could you (please )?clarify""")
+
+    private fun cleanReply(text: String, owner: String): String {
+        var t = text.trim().removeSurrounding("\"").removeSurrounding("“", "”").trim()
+        t = t.replace(Regex("""(?i)^(alfred|assistant)\s*:\s*"""), "")
+        if (CHATBOT.containsMatchIn(t)) t = "Thanks for your message! I'll pass it on to $owner 🙂"
+        return t
+    }
+
+    private fun revealsPlace(reply: String, c: Config): Boolean =
+        Regex("""(?i)\bat (home|work|the office|office|college|the gym)\b""").containsMatchIn(reply) ||
+            c.places.any { Regex("""(?i)\b${Regex.escape(it.name)}\b""").containsMatchIn(reply) }
+
+    /** "call", "media" or "deleted" for notifications with no real text, else null. */
+    private fun nonText(text: String): String? {
+        val t = text.trim()
+        return when {
+            Regex("""(?i)^(this message was deleted|you deleted this message)$""").matches(t) -> "deleted"
+            Regex("""(?i)missed (voice |video )?call""").containsMatchIn(t) && t.length < 40 -> "call"
+            Regex("""(?i)^(📷|🎥|🎤|🎵|📄|📍|👤|🎞️|🖼️)?\s*(photo|video|voice message|audio|sticker|gif|document|location|contact|image)?\s*$""").matches(t) && t.isNotEmpty() -> "media"
+            else -> null
+        }
+    }
 
     private val IDENTITY = Regex(
         """(?i)(\bwho (am i|is (this|it)|are you|r u)\b|\b(are|r) (you|u) (a )?(bot|ai|human|real|robot)\b|\bis this (really )?\w+\s*\?|^\s*what are you\s*\??\s*$)""")
